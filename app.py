@@ -48,33 +48,9 @@ def predict_threat(*values):
     label = le.inverse_transform([pred])[0]
 
     if label == 'BENIGN':
-        result = f"""
-<div class="result-card result-positive">
-    <div class="result-icon">✅</div>
-    <div class="result-text">
-        <h3>BENIGN TRAFFIC</h3>
-        <p class="confidence-text">Confidence: <strong>{confidence}%</strong></p>
-        <p class="detail-text">This network flow appears normal. No threat detected.</p>
-    </div>
-</div>
-<div class="confidence-bar-track">
-    <div class="confidence-bar-fill confidence-fill-positive" style="width:{confidence}%;"></div>
-</div>
-"""
+        result = f"✅ BENIGN TRAFFIC\nConfidence: {confidence}%\n\nThis network flow appears normal. No threat detected."
     else:
-        result = f"""
-<div class="result-card result-negative">
-    <div class="result-icon">🚨</div>
-    <div class="result-text">
-        <h3>ATTACK DETECTED: {label}</h3>
-        <p class="confidence-text">Confidence: <strong>{confidence}%</strong></p>
-        <p class="detail-text">This network flow matches patterns of a {label} attack. Immediate review recommended.</p>
-    </div>
-</div>
-<div class="confidence-bar-track">
-    <div class="confidence-bar-fill confidence-fill-negative" style="width:{confidence}%;"></div>
-</div>
-"""
+        result = f"🚨 ATTACK DETECTED: {label}\nConfidence: {confidence}%\n\nThis network flow matches patterns of a {label} attack. Immediate review recommended."
 
     return result
 
@@ -91,87 +67,13 @@ def load_sample(sample_type):
     return [row[feat] for feat in top_features]
 
 
-# ── Custom Theme ───────────────────────────────────────────
+# ── Light color polish only (no layout changes) ───────────
 custom_theme = gr.themes.Soft(
     primary_hue="red",
     secondary_hue="slate",
-    neutral_hue="slate",
-).set(
-    button_primary_background_fill="*primary_600",
-    button_primary_background_fill_hover="*primary_700",
-    block_title_text_weight="600",
-    block_border_width="1px",
-    block_shadow="*shadow_drop_lg",
 )
 
 custom_css = """
-#header-banner {
-    background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
-    padding: 24px 32px;
-    border-radius: 12px;
-    margin-bottom: 16px;
-}
-#header-banner h1 {
-    color: white !important;
-    margin: 0 !important;
-}
-#header-banner p {
-    color: #cbd5e1 !important;
-    margin: 4px 0 0 0 !important;
-}
-.result-card {
-    display: flex;
-    align-items: flex-start;
-    gap: 16px;
-    padding: 20px;
-    border-radius: 10px;
-    margin-bottom: 12px;
-}
-.result-card.result-positive {
-    background: #f0fdf4;
-    border-left: 4px solid #22c55e;
-}
-.result-card.result-negative {
-    background: #fef2f2;
-    border-left: 4px solid #ef4444;
-}
-.result-icon {
-    font-size: 32px;
-    line-height: 1;
-}
-.result-text h3 {
-    margin: 0 0 6px 0;
-    font-size: 18px;
-    color: #1e293b;
-}
-.confidence-text {
-    margin: 0 0 6px 0;
-    font-size: 14px;
-    color: #334155;
-}
-.detail-text {
-    margin: 0;
-    font-size: 13px;
-    color: #64748b;
-}
-.confidence-bar-track {
-    height: 8px;
-    background: #e2e8f0;
-    border-radius: 99px;
-    overflow: hidden;
-    margin-bottom: 8px;
-}
-.confidence-bar-fill {
-    height: 100%;
-    border-radius: 99px;
-    transition: width 0.5s ease;
-}
-.confidence-fill-positive {
-    background: #22c55e;
-}
-.confidence-fill-negative {
-    background: #ef4444;
-}
 footer {visibility: hidden}
 """
 
@@ -179,16 +81,15 @@ footer {visibility: hidden}
 # ── Build Gradio Interface ────────────────────────────────
 with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_css) as app:
 
-    gr.HTML("""
-    <div id="header-banner">
-        <h1>🛡️ Telecom Network Threat Detector</h1>
-        <p>AI-powered intrusion detection using CICIDS 2017 dataset · Random Forest classifier</p>
-    </div>
-    """)
-
     gr.Markdown("""
-    Enter the network flow features below and click **Analyse Traffic** to detect threats,
-    or load a real sample from the test set with the buttons below.
+    # 🛡️ Telecom Network Threat Detector
+    ### AI-powered intrusion detection using CICIDS 2017 dataset
+    *Based on: Using AI in Cyber Security Risk Management for Telecom Industry 4.0*
+    ---
+    Enter the network flow features below and click **Analyse** to detect threats.
+
+    The fields below are generated automatically from the model's actual top 20
+    most important features — so the UI always matches what the model expects.
     """)
 
     gr.Markdown("### 🎲 Load a Real Sample")
@@ -219,7 +120,7 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     analyse_btn = gr.Button("🔍 Analyse Traffic", variant="primary", size="lg")
 
     gr.Markdown("### 🎯 Detection Result")
-    result_box = gr.HTML(value="<p style='color:#94a3b8;'>Results will appear here after analysis.</p>")
+    result_box = gr.Textbox(label="AI Analysis Result", lines=4, interactive=False)
 
     gr.Markdown("""
     ---
