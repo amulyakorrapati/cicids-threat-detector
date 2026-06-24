@@ -26,6 +26,8 @@ for f in top_features:
 # Takes *args matching the order of top_features, builds a full
 # 78-feature vector (zeros for everything not in top_features),
 # scales it, then selects just the top_features columns for prediction.
+# Returns the result text AND an HTML snippet used to recolor the
+# result box green (safe) or red (attack) via the elem_id we target in CSS.
 def predict_threat(*values):
     input_dict = dict(zip(top_features, values))
 
@@ -48,16 +50,20 @@ def predict_threat(*values):
     label = le.inverse_transform([pred])[0]
 
     if label == 'BENIGN':
-        result = f"✅ BENIGN TRAFFIC\nConfidence: {confidence}%\n\nThis network flow appears normal. No threat detected."
+        result_text = f"✅ BENIGN TRAFFIC\nConfidence: {confidence}%\n\nThis network flow appears normal. No threat detected."
+        status_class = "status-safe"
     else:
-        result = f"🚨 ATTACK DETECTED: {label}\nConfidence: {confidence}%\n\nThis network flow matches patterns of a {label} attack. Immediate review recommended."
+        result_text = f"🚨 ATTACK DETECTED: {label}\nConfidence: {confidence}%\n\nThis network flow matches patterns of a {label} attack. Immediate review recommended."
+        status_class = "status-danger"
 
-    return result
+    # Returns both the textbox value and a tiny HTML element whose class
+    # we use purely to trigger the corresponding CSS color via JS below.
+    status_html = f'<div id="status-flag" class="{status_class}"></div>'
+
+    return result_text, status_html
 
 
 # ── Load Sample function ──────────────────────────────────
-# Returns values in the exact order of top_features, taken from
-# real rows in the test set (never seen during training).
 def load_sample(sample_type):
     if sample_type == "BENIGN":
         row = sample_benign.sample(1).iloc[0]
@@ -67,7 +73,8 @@ def load_sample(sample_type):
     return [row[feat] for feat in top_features]
 
 
-# ── Light color polish only (no layout changes) ───────────
+# ── Theme + custom CSS: gradient background, highlighted inputs,
+#    and green/red result coloring ────────────────────────────
 custom_theme = gr.themes.Soft(
     primary_hue="red",
     secondary_hue="slate",
@@ -75,11 +82,81 @@ custom_theme = gr.themes.Soft(
 
 custom_css = """
 footer {visibility: hidden}
+
+/* Gradient page background */
+.gradio-container {
+    background: linear-gradient(135deg, #f0f4f8 0%, #e2e8f0 50%, #f0f4f8 100%) !important;
+}
+
+/* Highlight all number input boxes */
+input[type="number"] {
+    background: #ffffff !important;
+    border: 1.5px solid #cbd5e1 !important;
+    border-radius: 8px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+input[type="number"]:focus {
+    border-color: #ef4444 !important;
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15) !important;
+}
+
+/* Result textbox base styling */
+#result-box textarea {
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    border-width: 2px !important;
+    border-radius: 10px !important;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+/* Default neutral state */
+#result-box textarea {
+    background: #f8fafc !important;
+    border-color: #cbd5e1 !important;
+    color: #334155 !important;
+}
+
+/* Safe (green) state — applied when #status-flag.status-safe is present */
+#status-flag.status-safe ~ * #result-box textarea,
+.status-safe-active #result-box textarea {
+    background: #f0fdf4 !important;
+    border-color: #22c55e !important;
+    color: #15803d !important;
+}
+
+/* Danger (red) state — applied when #status-flag.status-danger is present */
+.status-danger-active #result-box textarea {
+    background: #fef2f2 !important;
+    border-color: #ef4444 !important;
+    color: #b91c1c !important;
+}
+
+#status-flag { display: none; }
+"""
+
+# Small JS snippet: watches the hidden status flag div and toggles a class
+# on <body> so the CSS rules above can recolor the result box accordingly.
+custom_js = """
+function watchStatusFlag() {
+    const observer = new MutationObserver(() => {
+        const flag = document.getElementById('status-flag');
+        if (!flag) return;
+        document.body.classList.remove('status-safe-active', 'status-danger-active');
+        if (flag.classList.contains('status-safe')) {
+            document.body.classList.add('status-safe-active');
+        } else if (flag.classList.contains('status-danger')) {
+            document.body.classList.add('status-danger-active');
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+}
+window.addEventListener('load', watchStatusFlag);
 """
 
 
 # ── Build Gradio Interface ────────────────────────────────
-with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_css) as app:
+with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_css, js=custom_js) as app:
 
     gr.Markdown("""
     # 🛡️ Telecom Network Threat Detector
@@ -120,7 +197,8 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     analyse_btn = gr.Button("🔍 Analyse Traffic", variant="primary", size="lg")
 
     gr.Markdown("### 🎯 Detection Result")
-    result_box = gr.Textbox(label="AI Analysis Result", lines=4, interactive=False)
+    result_box = gr.Textbox(label="AI Analysis Result", lines=4, interactive=False, elem_id="result-box")
+    status_flag = gr.HTML(value="", elem_id="status-flag-wrapper")
 
     gr.Markdown("""
     ---
@@ -132,7 +210,7 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     analyse_btn.click(
         fn=predict_threat,
         inputs=ordered_inputs,
-        outputs=result_box
+        outputs=[result_box, status_flag]
     )
 
     load_benign_btn.click(
