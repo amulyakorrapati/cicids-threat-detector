@@ -22,28 +22,84 @@ for f in top_features:
     print(f"  - {f}")
 
 
+# ── Friendly descriptions for technical feature names ──────
+# Purely cosmetic -- shown as a short subtitle under each input.
+# If a feature isn't in this dictionary (e.g. after retraining
+# changes the top 20), it just won't show a subtitle -- nothing breaks.
+FEATURE_INFO = {
+    "Fwd Packet Length Max":        "Largest packet sent by the source",
+    "Init_Win_bytes_forward":       "Initial window size from sender",
+    "Destination Port":             "Port number being connected to",
+    "Avg Fwd Segment Size":         "Average size of data sent",
+    "Subflow Fwd Packets":          "Packets sent in this sub-connection",
+    "Fwd IAT Std":                  "Variation in time between sent packets",
+    "act_data_pkt_fwd":             "Packets that actually carried data",
+    "Subflow Fwd Bytes":            "Bytes sent in this sub-connection",
+    "Total Length of Fwd Packets":  "Total data sent, in bytes",
+    "Fwd Packet Length Mean":       "Average size of packets sent",
+    "Fwd IAT Mean":                 "Average time between sent packets",
+    "Fwd IAT Total":                "Total time spent sending packets",
+    "Fwd Packet Length Std":        "Variation in size of packets sent",
+    "Bwd Packet Length Max":        "Largest packet received in reply",
+    "Bwd Packet Length Min":        "Smallest packet received in reply",
+    "Avg Bwd Segment Size":         "Average size of data received",
+    "Fwd IAT Max":                  "Longest pause between sent packets",
+    "Fwd Header Length":            "Total size of packet headers sent",
+    "Total Backward Packets":       "Number of packets received in reply",
+    "Bwd Packet Length Mean":       "Average size of packets received",
+}
+
+# ── Group features into friendly categories for the accordion UI ──
+# Falls back gracefully: any top_feature not explicitly grouped below
+# is placed into "Other Flow Details" automatically, so this never
+# breaks even if retraining changes which 20 features are selected.
+GROUP_DEFINITIONS = [
+    ("📤 Outgoing Traffic (what you sent)", [
+        "Fwd Packet Length Max", "Fwd Packet Length Mean", "Fwd Packet Length Std",
+        "Total Length of Fwd Packets", "Subflow Fwd Packets", "Subflow Fwd Bytes",
+        "act_data_pkt_fwd", "Avg Fwd Segment Size", "Fwd Header Length",
+    ]),
+    ("📥 Incoming Traffic (what you received)", [
+        "Bwd Packet Length Max", "Bwd Packet Length Min", "Bwd Packet Length Mean",
+        "Avg Bwd Segment Size", "Total Backward Packets",
+    ]),
+    ("⏱️ Timing Patterns", [
+        "Fwd IAT Mean", "Fwd IAT Std", "Fwd IAT Total", "Fwd IAT Max",
+    ]),
+    ("🔌 Connection Details", [
+        "Destination Port", "Init_Win_bytes_forward",
+    ]),
+]
+
+
+def build_groups(features):
+    """Split `features` into the predefined groups above, plus a
+    catch-all 'Other' group for anything not explicitly listed."""
+    remaining = list(features)
+    groups = []
+    for title, names in GROUP_DEFINITIONS:
+        in_group = [f for f in names if f in remaining]
+        for f in in_group:
+            remaining.remove(f)
+        if in_group:
+            groups.append((title, in_group))
+    if remaining:
+        groups.append(("📊 Other Flow Details", remaining))
+    return groups
+
+
 # ── Prediction function ───────────────────────────────────
-# Takes *args matching the order of top_features, builds a full
-# 78-feature vector (zeros for everything not in top_features),
-# scales it, then selects just the top_features columns for prediction.
-# Returns the result text AND a gr.update() that recolors the textbox
-# itself via elem_classes -- no custom JS needed.
 def predict_threat(*values):
     input_dict = dict(zip(top_features, values))
 
-    # Build full feature vector (zeros for unused features)
     full_vector = pd.DataFrame([{f: 0 for f in all_features}])
     for feat, val in input_dict.items():
         full_vector[feat] = val
 
-    # Scale using the SAME scaler fitted on all 78 features
     scaled = scaler.transform(full_vector)
     scaled_df = pd.DataFrame(scaled, columns=all_features)
-
-    # Select only the top features, in the exact order the model expects
     top_input = scaled_df[top_features].values
 
-    # Predict
     pred = model.predict(top_input)[0]
     proba = model.predict_proba(top_input)[0]
     confidence = round(max(proba) * 100, 2)
@@ -69,8 +125,7 @@ def load_sample(sample_type):
     return [row[feat] for feat in top_features]
 
 
-# ── Theme + custom CSS: gradient background, highlighted inputs,
-#    and green/red result coloring (pure CSS, no custom JS) ─────
+# ── Theme + custom CSS ─────────────────────────────────────
 custom_theme = gr.themes.Soft(
     primary_hue="red",
     secondary_hue="slate",
@@ -79,12 +134,10 @@ custom_theme = gr.themes.Soft(
 custom_css = """
 footer {visibility: hidden}
 
-/* Gradient page background */
 .gradio-container {
     background: linear-gradient(135deg, #f0f4f8 0%, #e2e8f0 50%, #f0f4f8 100%) !important;
 }
 
-/* Highlight all number input boxes */
 input[type="number"] {
     background: #ffffff !important;
     border: 1.5px solid #cbd5e1 !important;
@@ -97,7 +150,6 @@ input[type="number"]:focus {
     box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15) !important;
 }
 
-/* Result textbox base styling */
 .result-box textarea {
     font-size: 15px !important;
     font-weight: 500 !important;
@@ -109,18 +161,23 @@ input[type="number"]:focus {
     transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
 }
 
-/* Safe (green) state -- applied via elem_classes from Python */
 .status-safe textarea {
     background: #f0fdf4 !important;
     border-color: #22c55e !important;
     color: #15803d !important;
 }
 
-/* Danger (red) state -- applied via elem_classes from Python */
 .status-danger textarea {
     background: #fef2f2 !important;
     border-color: #ef4444 !important;
     color: #b91c1c !important;
+}
+
+/* Small grey helper text under each input field */
+.feature-hint {
+    font-size: 11px !important;
+    color: #94a3b8 !important;
+    margin: -8px 0 8px 4px !important;
 }
 """
 
@@ -133,10 +190,8 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     ### AI-powered intrusion detection using CICIDS 2017 dataset
     *Based on: Using AI in Cyber Security Risk Management for Telecom Industry 4.0*
     ---
-    Enter the network flow features below and click **Analyse** to detect threats.
-
-    The fields below are generated automatically from the model's actual top 20
-    most important features — so the UI always matches what the model expects.
+    Enter the network flow features below and click **Analyse** to detect threats,
+    or load a real test sample using the buttons below.
     """)
 
     gr.Markdown("### 🎲 Load a Real Sample")
@@ -145,20 +200,22 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
         load_ddos_btn   = gr.Button("📥 Load random DDoS sample")
 
     gr.Markdown("### 🧮 Network Flow Features")
+    gr.Markdown(
+        "*Grouped below by category. Each field also shows a plain-English hint. "
+        "Expand a section to edit its values, or just use the Load Sample buttons above.*"
+    )
 
-    # Dynamically create one gr.Number() input per top feature,
-    # distributed round-robin across 3 columns for a clean layout.
+    # Build grouped, collapsible sections instead of one flat 3-column grid.
     box_lookup = {}
-    with gr.Row():
-        with gr.Column():
-            for feat in top_features[0::3]:
+    grouped = build_groups(top_features)
+
+    for i, (group_title, group_features) in enumerate(grouped):
+        with gr.Accordion(group_title, open=(i == 0)):
+            for feat in group_features:
                 box_lookup[feat] = gr.Number(label=feat, value=0)
-        with gr.Column():
-            for feat in top_features[1::3]:
-                box_lookup[feat] = gr.Number(label=feat, value=0)
-        with gr.Column():
-            for feat in top_features[2::3]:
-                box_lookup[feat] = gr.Number(label=feat, value=0)
+                hint = FEATURE_INFO.get(feat)
+                if hint:
+                    gr.Markdown(f"*{hint}*", elem_classes=["feature-hint"])
 
     # Reorder boxes to match top_features order, so predict_threat()
     # and load_sample() (which use top_features order) line up correctly.
