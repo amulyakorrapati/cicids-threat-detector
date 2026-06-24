@@ -26,8 +26,8 @@ for f in top_features:
 # Takes *args matching the order of top_features, builds a full
 # 78-feature vector (zeros for everything not in top_features),
 # scales it, then selects just the top_features columns for prediction.
-# Returns the result text AND an HTML snippet used to recolor the
-# result box green (safe) or red (attack) via the elem_id we target in CSS.
+# Returns the result text AND a gr.update() that recolors the textbox
+# itself via elem_classes -- no custom JS needed.
 def predict_threat(*values):
     input_dict = dict(zip(top_features, values))
 
@@ -51,16 +51,12 @@ def predict_threat(*values):
 
     if label == 'BENIGN':
         result_text = f"✅ BENIGN TRAFFIC\nConfidence: {confidence}%\n\nThis network flow appears normal. No threat detected."
-        status_class = "status-safe"
+        new_classes = ["result-box", "status-safe"]
     else:
         result_text = f"🚨 ATTACK DETECTED: {label}\nConfidence: {confidence}%\n\nThis network flow matches patterns of a {label} attack. Immediate review recommended."
-        status_class = "status-danger"
+        new_classes = ["result-box", "status-danger"]
 
-    # Returns both the textbox value and a tiny HTML element whose class
-    # we use purely to trigger the corresponding CSS color via JS below.
-    status_html = f'<div id="status-flag" class="{status_class}"></div>'
-
-    return result_text, status_html
+    return gr.update(value=result_text, elem_classes=new_classes)
 
 
 # ── Load Sample function ──────────────────────────────────
@@ -74,7 +70,7 @@ def load_sample(sample_type):
 
 
 # ── Theme + custom CSS: gradient background, highlighted inputs,
-#    and green/red result coloring ────────────────────────────
+#    and green/red result coloring (pure CSS, no custom JS) ─────
 custom_theme = gr.themes.Soft(
     primary_hue="red",
     secondary_hue="slate",
@@ -102,61 +98,35 @@ input[type="number"]:focus {
 }
 
 /* Result textbox base styling */
-#result-box textarea {
+.result-box textarea {
     font-size: 15px !important;
     font-weight: 500 !important;
     border-width: 2px !important;
     border-radius: 10px !important;
-    transition: background-color 0.3s ease, border-color 0.3s ease;
-}
-
-/* Default neutral state */
-#result-box textarea {
     background: #f8fafc !important;
     border-color: #cbd5e1 !important;
     color: #334155 !important;
+    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
 }
 
-/* Safe (green) state — applied when #status-flag.status-safe is present */
-#status-flag.status-safe ~ * #result-box textarea,
-.status-safe-active #result-box textarea {
+/* Safe (green) state -- applied via elem_classes from Python */
+.status-safe textarea {
     background: #f0fdf4 !important;
     border-color: #22c55e !important;
     color: #15803d !important;
 }
 
-/* Danger (red) state — applied when #status-flag.status-danger is present */
-.status-danger-active #result-box textarea {
+/* Danger (red) state -- applied via elem_classes from Python */
+.status-danger textarea {
     background: #fef2f2 !important;
     border-color: #ef4444 !important;
     color: #b91c1c !important;
 }
-
-#status-flag { display: none; }
-"""
-
-# Small JS snippet: watches the hidden status flag div and toggles a class
-# on <body> so the CSS rules above can recolor the result box accordingly.
-custom_js = """
-function watchStatusFlag() {
-    const observer = new MutationObserver(() => {
-        const flag = document.getElementById('status-flag');
-        if (!flag) return;
-        document.body.classList.remove('status-safe-active', 'status-danger-active');
-        if (flag.classList.contains('status-safe')) {
-            document.body.classList.add('status-safe-active');
-        } else if (flag.classList.contains('status-danger')) {
-            document.body.classList.add('status-danger-active');
-        }
-    });
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
-}
-window.addEventListener('load', watchStatusFlag);
 """
 
 
 # ── Build Gradio Interface ────────────────────────────────
-with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_css, js=custom_js) as app:
+with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_css) as app:
 
     gr.Markdown("""
     # 🛡️ Telecom Network Threat Detector
@@ -197,8 +167,12 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     analyse_btn = gr.Button("🔍 Analyse Traffic", variant="primary", size="lg")
 
     gr.Markdown("### 🎯 Detection Result")
-    result_box = gr.Textbox(label="AI Analysis Result", lines=4, interactive=False, elem_id="result-box")
-    status_flag = gr.HTML(value="", elem_id="status-flag-wrapper")
+    result_box = gr.Textbox(
+        label="AI Analysis Result",
+        lines=4,
+        interactive=False,
+        elem_classes=["result-box"]
+    )
 
     gr.Markdown("""
     ---
@@ -210,7 +184,7 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     analyse_btn.click(
         fn=predict_threat,
         inputs=ordered_inputs,
-        outputs=[result_box, status_flag]
+        outputs=result_box
     )
 
     load_benign_btn.click(
