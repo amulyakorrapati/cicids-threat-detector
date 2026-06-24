@@ -134,4 +134,4 @@ with gr.Blocks(title="Telecom Threat Detector") as app:
         outputs=ordered_inputs
     )
 
-app.launch()
+app.launch(server_name="0.0.0.0", server_port=7860)
