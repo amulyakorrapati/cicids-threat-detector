@@ -1,6 +1,7 @@
 # ============================================================
 # app.py — Gradio Web Interface for Multi-Attack Threat Detection
 # (Dynamically built from the model's actual top features)
+# Now includes: manual entry, real sample loading, and batch CSV upload
 # ============================================================
 
 import gradio as gr
@@ -48,7 +49,6 @@ FEATURE_INFO = {
     "act_data_pkt_fwd":           "Packets that actually carried data",
 }
 
-# ── Group features into friendly categories ────────────────
 GROUP_DEFINITIONS = [
     ("📤 Outgoing Traffic (what was sent)", [
         "Fwd Packet Length Max", "Fwd Packet Length Mean", "Total Length of Fwd Packets",
@@ -69,8 +69,6 @@ GROUP_DEFINITIONS = [
 
 
 def build_groups(features):
-    """Split `features` into the predefined groups above, plus a
-    catch-all 'Other' group for anything not explicitly listed."""
     remaining = list(features)
     groups = []
     for title, names in GROUP_DEFINITIONS:
@@ -85,15 +83,6 @@ def build_groups(features):
 
 
 # ── Attack knowledge base ──────────────────────────────────
-# Plain-English explanation, severity level, and recommended action
-# for each class the model can output. This is the new piece that
-# turns a bare label into something a non-technical user can act on.
-#
-# Severity scale: "none" (BENIGN), "low", "medium", "high", "critical"
-#
-# If the model is ever retrained and a brand-new class name appears
-# that isn't listed here, ATTACK_INFO.get() falls back to a generic
-# but still useful explanation -- so this never breaks the app.
 ATTACK_INFO = {
     "BENIGN": {
         "severity": "none",
@@ -191,7 +180,6 @@ DEFAULT_ATTACK_INFO = {
     "recommended_action": "Review the flow manually and consult your security team if the pattern repeats.",
 }
 
-# Visual styling per severity level
 SEVERITY_STYLE = {
     "none":     {"emoji": "✅", "css_class": "status-safe",   "label": "No Threat"},
     "low":      {"emoji": "🟡", "css_class": "status-low",    "label": "Low Severity"},
@@ -200,14 +188,20 @@ SEVERITY_STYLE = {
     "critical": {"emoji": "🚨", "css_class": "status-danger", "label": "Critical Severity"},
 }
 
+# Ordering used to sort the batch results table, worst-first
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "none": 4}
 
-# ── Prediction function ───────────────────────────────────
-def predict_threat(*values):
-    input_dict = dict(zip(top_features, values))
 
+# ── Core single-row prediction logic ───────────────────────
+# Shared by both the manual-entry form and the batch CSV pipeline,
+# so the two paths can never disagree about how a flow is classified.
+def predict_single_row(row_dict):
+    """row_dict: a dict of {feature_name: value} for ANY subset of
+    all_features (missing ones default to 0). Returns (label, confidence, proba_dict)."""
     full_vector = pd.DataFrame([{f: 0 for f in all_features}])
-    for feat, val in input_dict.items():
-        full_vector[feat] = val
+    for feat, val in row_dict.items():
+        if feat in full_vector.columns:
+            full_vector[feat] = val
 
     scaled = scaler.transform(full_vector)
     scaled_df = pd.DataFrame(scaled, columns=all_features)
@@ -217,7 +211,12 @@ def predict_threat(*values):
     proba = model.predict_proba(top_input)[0]
     confidence = round(max(proba) * 100, 2)
     label = le.inverse_transform([pred])[0]
+    proba_dict = {cls: round(p * 100, 2) for cls, p in zip(class_names, proba)}
 
+    return label, confidence, proba_dict
+
+
+def build_result_text(label, confidence, proba_dict):
     info = ATTACK_INFO.get(label, DEFAULT_ATTACK_INFO)
     style = SEVERITY_STYLE.get(info["severity"], SEVERITY_STYLE["medium"])
 
@@ -237,14 +236,19 @@ def predict_threat(*values):
     )
 
     proba_lines = "\n".join(
-        f"   {cls}: {round(p * 100, 2)}%"
-        for cls, p in sorted(zip(class_names, proba), key=lambda x: -x[1])
+        f"   {cls}: {p}%" for cls, p in sorted(proba_dict.items(), key=lambda x: -x[1])
     )
     result_text += f"\nFull probability breakdown:\n{proba_lines}"
 
-    new_classes = ["result-box", style["css_class"]]
+    return result_text, ["result-box", style["css_class"]]
 
-    return gr.update(value=result_text, elem_classes=new_classes)
+
+# ── Manual-entry prediction function ───────────────────────
+def predict_threat(*values):
+    input_dict = dict(zip(top_features, values))
+    label, confidence, proba_dict = predict_single_row(input_dict)
+    result_text, css_classes = build_result_text(label, confidence, proba_dict)
+    return gr.update(value=result_text, elem_classes=css_classes)
 
 
 # ── Load Sample function ──────────────────────────────────
@@ -254,6 +258,97 @@ def load_sample(sample_type):
         return [0 for _ in top_features]
     row = class_samples.sample(1).iloc[0]
     return [row[feat] for feat in top_features]
+
+
+# ── Batch CSV analysis function ────────────────────────────
+def analyse_batch(file):
+    if file is None:
+        return (
+            "No file uploaded yet. Please choose a CSV file above first.",
+            None
+        )
+
+    try:
+        batch_df = pd.read_csv(file.name, low_memory=False)
+    except Exception as e:
+        return (f"Could not read this file as a CSV. Error: {e}", None)
+
+    # Clean column names the same way training does, so a CSV exported
+    # from the same kind of tool (e.g. CICFlowMeter) lines up correctly.
+    batch_df.columns = batch_df.columns.str.strip()
+
+    # Drop a Label column if present (so users can upload labelled
+    # CICIDS-style files too, without it interfering with prediction).
+    label_col = None
+    for candidate in ["Label", "label", " Label"]:
+        if candidate in batch_df.columns:
+            label_col = candidate
+            break
+    true_labels = batch_df[label_col] if label_col else None
+    if label_col:
+        batch_df = batch_df.drop(columns=[label_col])
+
+    # Replace infinities/NaNs the same way training does, but here we
+    # fill rather than drop, so every uploaded row gets a result.
+    batch_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    batch_df.fillna(0, inplace=True)
+
+    if len(batch_df) == 0:
+        return ("The uploaded file had no usable rows.", None)
+
+    # Cap how many rows we process in one go, to keep the free-tier
+    # Space responsive. 5,000 rows is generous for a demo and still fast.
+    MAX_ROWS = 5000
+    truncated = len(batch_df) > MAX_ROWS
+    if truncated:
+        batch_df = batch_df.iloc[:MAX_ROWS]
+
+    results = []
+    for i, row in batch_df.iterrows():
+        row_dict = {f: row[f] for f in all_features if f in batch_df.columns}
+        try:
+            label, confidence, _ = predict_single_row(row_dict)
+        except Exception:
+            label, confidence = "ERROR", 0.0
+
+        info = ATTACK_INFO.get(label, DEFAULT_ATTACK_INFO)
+        severity = info["severity"] if label != "ERROR" else "medium"
+
+        results.append({
+            "Row": i + 1,
+            "Prediction": label,
+            "Confidence (%)": confidence,
+            "Severity": SEVERITY_STYLE.get(severity, SEVERITY_STYLE["medium"])["label"],
+            "_severity_rank": SEVERITY_RANK.get(severity, 2),
+        })
+
+    results_df = pd.DataFrame(results)
+    # Worst-first ordering: critical/high threats surface at the top
+    # of the table rather than getting buried among hundreds of BENIGN rows.
+    results_df = results_df.sort_values(
+        by=["_severity_rank", "Confidence (%)"], ascending=[True, False]
+    ).drop(columns=["_severity_rank"])
+
+    # Build the summary
+    counts = pd.Series([r["Prediction"] for r in results]).value_counts()
+    total = len(results)
+    threat_total = total - counts.get("BENIGN", 0)
+
+    summary_lines = [
+        f"Analysed {total} row(s)" + (f" (first {MAX_ROWS} of {len(batch_df)} -- file truncated)" if truncated else "") + ".",
+        f"Threats detected: {threat_total} / {total}",
+        "",
+        "Breakdown by traffic type:",
+    ]
+    for cls in class_names:
+        c = counts.get(cls, 0)
+        if c > 0:
+            pct = round((c / total) * 100, 1)
+            summary_lines.append(f"   {cls}: {c} ({pct}%)")
+
+    summary_text = "\n".join(summary_lines)
+
+    return summary_text, results_df
 
 
 # ── Theme + custom CSS ─────────────────────────────────────
@@ -294,40 +389,43 @@ input[type="number"]:focus {
     transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
 }
 
-/* No threat -- green */
 .status-safe textarea {
     background: #f0fdf4 !important;
     border-color: #22c55e !important;
     color: #15803d !important;
 }
-
-/* Low severity -- yellow */
 .status-low textarea {
     background: #fefce8 !important;
     border-color: #eab308 !important;
     color: #854d0e !important;
 }
-
-/* Medium severity -- orange */
 .status-medium textarea {
     background: #fff7ed !important;
     border-color: #f97316 !important;
     color: #9a3412 !important;
 }
-
-/* High severity -- deep red/orange */
 .status-high textarea {
     background: #fef2f2 !important;
     border-color: #dc2626 !important;
     color: #991b1b !important;
 }
-
-/* Critical severity -- strongest red */
 .status-danger textarea {
     background: #fef2f2 !important;
     border-color: #ef4444 !important;
     color: #b91c1c !important;
     font-weight: 700 !important;
+}
+
+.batch-summary textarea {
+    font-size: 13.5px !important;
+    font-weight: 600 !important;
+    border-width: 2px !important;
+    border-radius: 10px !important;
+    background: #f8fafc !important;
+    border-color: #94a3b8 !important;
+    color: #1e293b !important;
+    font-family: Consolas, monospace !important;
+    line-height: 1.5 !important;
 }
 
 .feature-hint {
@@ -346,72 +444,114 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     ### AI-powered multi-attack intrusion detection using CICIDS 2017 dataset
     *Based on: Using AI in Cyber Security Risk Management for Telecom Industry 4.0*
     ---
-    This model can now detect **{len(class_names)} traffic types**: {", ".join(class_names)}.
-
-    Enter the network flow features below and click **Analyse** to detect threats,
-    or load a real test sample for any class using the buttons below.
-    Every result now includes a plain-English explanation of the attack type,
-    its severity, and a recommended next step.
+    This model can detect **{len(class_names)} traffic types**: {", ".join(class_names)}.
     """)
 
-    gr.Markdown("### 🎲 Load a Real Sample")
-    gr.Markdown("*Pick a traffic type below to instantly fill the fields with a real example from the test set.*")
-    with gr.Row():
-        sample_dropdown = gr.Dropdown(
-            choices=class_names,
-            value=class_names[0],
-            label="Traffic type to load",
-            scale=3
-        )
-        load_sample_btn = gr.Button("📥 Load Sample", scale=1)
+    with gr.Tabs():
 
-    gr.Markdown("### 🧮 Network Flow Features")
-    gr.Markdown(
-        "*Grouped below by category. Each field also shows a plain-English hint. "
-        "Expand a section to edit its values, or just use the Load Sample control above.*"
-    )
+        # ───────────── TAB 1: Single Flow Analysis ─────────────
+        with gr.Tab("🔍 Single Flow Analysis"):
 
-    box_lookup = {}
-    grouped = build_groups(top_features)
+            gr.Markdown(
+                "Enter the network flow features below and click **Analyse** to detect threats, "
+                "or load a real test sample for any class using the controls below."
+            )
 
-    for i, (group_title, group_features) in enumerate(grouped):
-        with gr.Accordion(group_title, open=(i == 0)):
-            for feat in group_features:
-                box_lookup[feat] = gr.Number(label=feat, value=0)
-                hint = FEATURE_INFO.get(feat)
-                if hint:
-                    gr.Markdown(f"*{hint}*", elem_classes=["feature-hint"])
+            gr.Markdown("### 🎲 Load a Real Sample")
+            gr.Markdown("*Pick a traffic type below to instantly fill the fields with a real example from the test set.*")
+            with gr.Row():
+                sample_dropdown = gr.Dropdown(
+                    choices=class_names,
+                    value=class_names[0],
+                    label="Traffic type to load",
+                    scale=3
+                )
+                load_sample_btn = gr.Button("📥 Load Sample", scale=1)
 
-    ordered_inputs = [box_lookup[feat] for feat in top_features]
+            gr.Markdown("### 🧮 Network Flow Features")
+            gr.Markdown(
+                "*Grouped below by category. Each field also shows a plain-English hint. "
+                "Expand a section to edit its values, or just use the Load Sample control above.*"
+            )
 
-    analyse_btn = gr.Button("🔍 Analyse Traffic", variant="primary", size="lg")
+            box_lookup = {}
+            grouped = build_groups(top_features)
 
-    gr.Markdown("### 🎯 Detection Result")
-    result_box = gr.Textbox(
-        label="AI Analysis Result",
-        lines=16,
-        interactive=False,
-        elem_classes=["result-box"]
-    )
+            for i, (group_title, group_features) in enumerate(grouped):
+                with gr.Accordion(group_title, open=(i == 0)):
+                    for feat in group_features:
+                        box_lookup[feat] = gr.Number(label=feat, value=0)
+                        hint = FEATURE_INFO.get(feat)
+                        if hint:
+                            gr.Markdown(f"*{hint}*", elem_classes=["feature-hint"])
+
+            ordered_inputs = [box_lookup[feat] for feat in top_features]
+
+            analyse_btn = gr.Button("🔍 Analyse Traffic", variant="primary", size="lg")
+
+            gr.Markdown("### 🎯 Detection Result")
+            result_box = gr.Textbox(
+                label="AI Analysis Result",
+                lines=16,
+                interactive=False,
+                elem_classes=["result-box"]
+            )
+
+            analyse_btn.click(
+                fn=predict_threat,
+                inputs=ordered_inputs,
+                outputs=result_box
+            )
+
+            load_sample_btn.click(
+                fn=load_sample,
+                inputs=sample_dropdown,
+                outputs=ordered_inputs
+            )
+
+        # ───────────── TAB 2: Batch CSV Analysis ─────────────
+        with gr.Tab("📂 Batch CSV Analysis"):
+
+            gr.Markdown("""
+            ### Analyse Many Flows at Once
+            Upload a CSV file containing network flow data (the same format as the CICIDS 2017
+            dataset -- one row per flow, with the same column names the model was trained on).
+            Every row will be classified individually.
+
+            If your file includes the original `Label` column, it will simply be ignored for
+            prediction purposes -- you don't need to remove it first.
+            """)
+
+            csv_input = gr.File(label="Upload CSV file", file_types=[".csv"])
+            batch_btn = gr.Button("📊 Analyse Batch", variant="primary", size="lg")
+
+            gr.Markdown("### 📈 Summary")
+            batch_summary = gr.Textbox(
+                label="Batch Summary",
+                lines=8,
+                interactive=False,
+                elem_classes=["batch-summary"]
+            )
+
+            gr.Markdown("### 📋 Per-Row Results")
+            gr.Markdown("*Sorted with the most severe detections first.*")
+            batch_table = gr.Dataframe(
+                headers=["Row", "Prediction", "Confidence (%)", "Severity"],
+                interactive=False,
+                wrap=True
+            )
+
+            batch_btn.click(
+                fn=analyse_batch,
+                inputs=csv_input,
+                outputs=[batch_summary, batch_table]
+            )
 
     gr.Markdown("""
     ---
     ### 🧪 Tip
-    Pick a traffic type above and click **"Load Sample"** to auto-fill the fields with
-    real data from the test set, then click **Analyse Traffic** to see the detection result
-    along with a plain-English explanation of what it means and what to do about it.
+    Use **Single Flow Analysis** to test one example at a time and see detailed plain-English
+    explanations, or use **Batch CSV Analysis** to scan many flows from a real traffic log at once.
     """)
-
-    analyse_btn.click(
-        fn=predict_threat,
-        inputs=ordered_inputs,
-        outputs=result_box
-    )
-
-    load_sample_btn.click(
-        fn=load_sample,
-        inputs=sample_dropdown,
-        outputs=ordered_inputs
-    )
 
 app.launch(server_name="0.0.0.0", server_port=7860)
