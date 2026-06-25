@@ -25,8 +25,6 @@ print(f"\nModel can detect these classes: {class_names}")
 
 
 # ── Friendly descriptions for technical feature names ──────
-# Purely cosmetic. Any feature not listed here just shows no hint --
-# nothing breaks, since this is decoupled from the model logic.
 FEATURE_INFO = {
     "Bwd Packets/s":              "How many reply packets arrive per second",
     "Packet Length Variance":     "How much packet sizes vary",
@@ -72,9 +70,7 @@ GROUP_DEFINITIONS = [
 
 def build_groups(features):
     """Split `features` into the predefined groups above, plus a
-    catch-all 'Other' group for anything not explicitly listed.
-    This means the UI never breaks even if retraining changes the
-    top 20 features again in the future."""
+    catch-all 'Other' group for anything not explicitly listed."""
     remaining = list(features)
     groups = []
     for title, names in GROUP_DEFINITIONS:
@@ -88,12 +84,121 @@ def build_groups(features):
     return groups
 
 
-# ── Severity / color mapping per class ─────────────────────
-# BENIGN -> safe (green). Everything else -> danger (red).
-# This keeps the color logic correct automatically even if the
-# set of attack class names changes after a future retrain.
-def classify_severity(label):
-    return "safe" if label == "BENIGN" else "danger"
+# ── Attack knowledge base ──────────────────────────────────
+# Plain-English explanation, severity level, and recommended action
+# for each class the model can output. This is the new piece that
+# turns a bare label into something a non-technical user can act on.
+#
+# Severity scale: "none" (BENIGN), "low", "medium", "high", "critical"
+#
+# If the model is ever retrained and a brand-new class name appears
+# that isn't listed here, ATTACK_INFO.get() falls back to a generic
+# but still useful explanation -- so this never breaks the app.
+ATTACK_INFO = {
+    "BENIGN": {
+        "severity": "none",
+        "what_it_is": "This is normal, everyday network traffic with no signs of malicious activity.",
+        "why_it_matters": "No action needed -- this is exactly what healthy traffic looks like.",
+        "recommended_action": "No action required. Continue normal monitoring.",
+    },
+    "DDoS": {
+        "severity": "critical",
+        "what_it_is": (
+            "A Distributed Denial-of-Service (DDoS) attack. The goal is to overwhelm a server or "
+            "network with a flood of traffic, so it becomes too slow or crashes entirely, "
+            "denying access to legitimate users."
+        ),
+        "why_it_matters": (
+            "DDoS attacks can take critical services completely offline, causing direct financial "
+            "loss, reputational damage, and -- in telecom networks specifically -- can disrupt service "
+            "for thousands of customers at once."
+        ),
+        "recommended_action": (
+            "Treat as urgent. Isolate or rate-limit the source if possible, alert your network "
+            "security team immediately, and check if upstream DDoS mitigation (e.g. traffic scrubbing) "
+            "needs to be activated."
+        ),
+    },
+    "PortScan": {
+        "severity": "medium",
+        "what_it_is": (
+            "A Port Scan. An attacker is systematically probing a target system to find which "
+            "network ports are open, which is usually the reconnaissance step before a more "
+            "serious attack."
+        ),
+        "why_it_matters": (
+            "On its own, a port scan doesn't cause damage -- but it's a strong early warning sign "
+            "that someone is actively looking for a way into your systems. Attacks often follow "
+            "shortly after."
+        ),
+        "recommended_action": (
+            "Investigate the source IP. Consider this an early warning -- review firewall rules and "
+            "watch closely for follow-up activity from the same source over the next few hours."
+        ),
+    },
+    "Bot": {
+        "severity": "high",
+        "what_it_is": (
+            "Botnet activity. This traffic pattern suggests the device may be infected with malware "
+            "and is communicating with a remote attacker (a 'command and control' server), often as "
+            "part of a larger network of compromised devices."
+        ),
+        "why_it_matters": (
+            "An infected device can be used to launch attacks on others, steal data, or spread "
+            "further malware -- all without the device owner's knowledge."
+        ),
+        "recommended_action": (
+            "Treat as serious. Isolate the affected device from the network, run a full malware scan, "
+            "and check for unusual outbound connections."
+        ),
+    },
+    "FTP-Patator": {
+        "severity": "high",
+        "what_it_is": (
+            "An FTP brute-force attack. An attacker is rapidly trying many username/password "
+            "combinations to break into a File Transfer Protocol (FTP) server."
+        ),
+        "why_it_matters": (
+            "If successful, the attacker gains access to files stored on the server -- which may "
+            "include sensitive documents, configuration files, or customer data."
+        ),
+        "recommended_action": (
+            "Lock or rate-limit the targeted account. Enable login attempt limits and consider "
+            "disabling FTP in favour of a more secure file transfer protocol if not already in place."
+        ),
+    },
+    "SSH-Patator": {
+        "severity": "high",
+        "what_it_is": (
+            "An SSH brute-force attack. An attacker is rapidly trying many username/password "
+            "combinations to gain remote command-line access to a server via SSH."
+        ),
+        "why_it_matters": (
+            "SSH access often grants deep control over a server. A successful breach here can lead "
+            "to full system compromise."
+        ),
+        "recommended_action": (
+            "Block the source IP, enforce key-based authentication instead of passwords if possible, "
+            "and review recent login attempts for any that succeeded."
+        ),
+    },
+}
+
+DEFAULT_ATTACK_INFO = {
+    "severity": "medium",
+    "what_it_is": "This traffic pattern was not specifically described in our knowledge base, but the model has flagged it as different from normal traffic.",
+    "why_it_matters": "Unclassified anomalies can still represent a real risk and are worth investigating.",
+    "recommended_action": "Review the flow manually and consult your security team if the pattern repeats.",
+}
+
+# Visual styling per severity level
+SEVERITY_STYLE = {
+    "none":     {"emoji": "✅", "css_class": "status-safe",   "label": "No Threat"},
+    "low":      {"emoji": "🟡", "css_class": "status-low",    "label": "Low Severity"},
+    "medium":   {"emoji": "🟠", "css_class": "status-medium", "label": "Medium Severity"},
+    "high":     {"emoji": "🔴", "css_class": "status-high",   "label": "High Severity"},
+    "critical": {"emoji": "🚨", "css_class": "status-danger", "label": "Critical Severity"},
+}
 
 
 # ── Prediction function ───────────────────────────────────
@@ -113,41 +218,39 @@ def predict_threat(*values):
     confidence = round(max(proba) * 100, 2)
     label = le.inverse_transform([pred])[0]
 
-    severity = classify_severity(label)
+    info = ATTACK_INFO.get(label, DEFAULT_ATTACK_INFO)
+    style = SEVERITY_STYLE.get(info["severity"], SEVERITY_STYLE["medium"])
 
-    if severity == "safe":
-        result_text = (
-            f"✅ BENIGN TRAFFIC\n"
-            f"Confidence: {confidence}%\n\n"
-            f"This network flow appears normal. No threat detected."
-        )
-        new_classes = ["result-box", "status-safe"]
+    if label == "BENIGN":
+        header = f"{style['emoji']} BENIGN TRAFFIC  —  {style['label']}"
     else:
-        result_text = (
-            f"🚨 ATTACK DETECTED: {label}\n"
-            f"Confidence: {confidence}%\n\n"
-            f"This network flow matches patterns of a {label} attack. Immediate review recommended."
-        )
-        new_classes = ["result-box", "status-danger"]
+        header = f"{style['emoji']} ATTACK DETECTED: {label}  —  {style['label']}"
 
-    # Show the full probability breakdown across all classes too,
-    # since with 6 classes the runner-up predictions are informative.
+    result_text = (
+        f"{header}\n"
+        f"Confidence: {confidence}%\n"
+        f"{'-' * 50}\n"
+        f"WHAT THIS MEANS:\n{info['what_it_is']}\n\n"
+        f"WHY IT MATTERS:\n{info['why_it_matters']}\n\n"
+        f"RECOMMENDED ACTION:\n{info['recommended_action']}\n"
+        f"{'-' * 50}\n"
+    )
+
     proba_lines = "\n".join(
         f"   {cls}: {round(p * 100, 2)}%"
         for cls, p in sorted(zip(class_names, proba), key=lambda x: -x[1])
     )
-    result_text += f"\n\nFull probability breakdown:\n{proba_lines}"
+    result_text += f"\nFull probability breakdown:\n{proba_lines}"
+
+    new_classes = ["result-box", style["css_class"]]
 
     return gr.update(value=result_text, elem_classes=new_classes)
 
 
 # ── Load Sample function ──────────────────────────────────
-# sample_type is now one of the actual class names (BENIGN, Bot, DDoS, etc.)
 def load_sample(sample_type):
     class_samples = samples_by_class.get(sample_type)
     if class_samples is None or len(class_samples) == 0:
-        # Should not happen given training always saves all classes,
-        # but guards against an empty/missing class gracefully.
         return [0 for _ in top_features]
     row = class_samples.sample(1).iloc[0]
     return [row[feat] for feat in top_features]
@@ -179,7 +282,7 @@ input[type="number"]:focus {
 }
 
 .result-box textarea {
-    font-size: 14px !important;
+    font-size: 13.5px !important;
     font-weight: 500 !important;
     border-width: 2px !important;
     border-radius: 10px !important;
@@ -187,19 +290,44 @@ input[type="number"]:focus {
     border-color: #cbd5e1 !important;
     color: #334155 !important;
     font-family: Consolas, monospace !important;
+    line-height: 1.5 !important;
     transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
 }
 
+/* No threat -- green */
 .status-safe textarea {
     background: #f0fdf4 !important;
     border-color: #22c55e !important;
     color: #15803d !important;
 }
 
+/* Low severity -- yellow */
+.status-low textarea {
+    background: #fefce8 !important;
+    border-color: #eab308 !important;
+    color: #854d0e !important;
+}
+
+/* Medium severity -- orange */
+.status-medium textarea {
+    background: #fff7ed !important;
+    border-color: #f97316 !important;
+    color: #9a3412 !important;
+}
+
+/* High severity -- deep red/orange */
+.status-high textarea {
+    background: #fef2f2 !important;
+    border-color: #dc2626 !important;
+    color: #991b1b !important;
+}
+
+/* Critical severity -- strongest red */
 .status-danger textarea {
     background: #fef2f2 !important;
     border-color: #ef4444 !important;
     color: #b91c1c !important;
+    font-weight: 700 !important;
 }
 
 .feature-hint {
@@ -222,6 +350,8 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
 
     Enter the network flow features below and click **Analyse** to detect threats,
     or load a real test sample for any class using the buttons below.
+    Every result now includes a plain-English explanation of the attack type,
+    its severity, and a recommended next step.
     """)
 
     gr.Markdown("### 🎲 Load a Real Sample")
@@ -241,8 +371,6 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
         "Expand a section to edit its values, or just use the Load Sample control above.*"
     )
 
-    # Dynamically create one gr.Number() input per top feature,
-    # grouped into friendly, collapsible sections.
     box_lookup = {}
     grouped = build_groups(top_features)
 
@@ -254,8 +382,6 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
                 if hint:
                     gr.Markdown(f"*{hint}*", elem_classes=["feature-hint"])
 
-    # Reorder boxes to match top_features order, so predict_threat()
-    # and load_sample() (which use top_features order) line up correctly.
     ordered_inputs = [box_lookup[feat] for feat in top_features]
 
     analyse_btn = gr.Button("🔍 Analyse Traffic", variant="primary", size="lg")
@@ -263,7 +389,7 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     gr.Markdown("### 🎯 Detection Result")
     result_box = gr.Textbox(
         label="AI Analysis Result",
-        lines=10,
+        lines=16,
         interactive=False,
         elem_classes=["result-box"]
     )
@@ -272,8 +398,8 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     ---
     ### 🧪 Tip
     Pick a traffic type above and click **"Load Sample"** to auto-fill the fields with
-    real data from the test set, then click **Analyse Traffic** to see how confidently
-    the model identifies it -- including the full probability breakdown across all classes.
+    real data from the test set, then click **Analyse Traffic** to see the detection result
+    along with a plain-English explanation of what it means and what to do about it.
     """)
 
     analyse_btn.click(
