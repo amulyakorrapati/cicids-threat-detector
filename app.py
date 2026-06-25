@@ -8,6 +8,155 @@ import gradio as gr
 import pandas as pd
 import numpy as np
 import joblib
+import os
+from datetime import datetime
+
+# ── Persistent threat log setup ───────────────────────────
+# Stored as a simple CSV on disk. Good enough for a demo project --
+# note this is NOT guaranteed to survive a full Space rebuild/redeploy
+# on the free tier, since the container filesystem can be reset then.
+# It DOES survive normal restarts/sleep-wake cycles in between.
+LOG_DIR = "logs"
+LOG_FILE = os.path.join(LOG_DIR, "threat_log.csv")
+LOG_COLUMNS = ["timestamp", "source", "prediction", "confidence", "severity"]
+
+os.makedirs(LOG_DIR, exist_ok=True)
+if not os.path.exists(LOG_FILE):
+    pd.DataFrame(columns=LOG_COLUMNS).to_csv(LOG_FILE, index=False)
+
+
+def log_detection(source, label, confidence, severity):
+    """Append one detection event to the persistent log.
+    source: 'Single Flow' or 'Batch CSV'."""
+    entry = pd.DataFrame([{
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "prediction": label,
+        "confidence": confidence,
+        "severity": severity,
+    }])
+    entry.to_csv(LOG_FILE, mode="a", header=False, index=False)
+
+
+def log_detections_bulk(source, rows):
+    """rows: list of (label, confidence, severity) tuples. Appends all
+    at once -- much faster than calling log_detection() per row during
+    a large batch upload."""
+    if not rows:
+        return
+    entries = pd.DataFrame(
+        [{
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": source,
+            "prediction": label,
+            "confidence": confidence,
+            "severity": severity,
+        } for label, confidence, severity in rows]
+    )
+    entries.to_csv(LOG_FILE, mode="a", header=False, index=False)
+
+
+def read_log():
+    try:
+        return pd.read_csv(LOG_FILE)
+    except Exception:
+        return pd.DataFrame(columns=LOG_COLUMNS)
+
+
+def clear_log():
+    pd.DataFrame(columns=LOG_COLUMNS).to_csv(LOG_FILE, index=False)
+    return build_dashboard_html()
+
+
+SEVERITY_ROW_CLASS = {
+    "none":     "row-safe",
+    "low":      "row-low",
+    "medium":   "row-medium",
+    "high":     "row-high",
+    "critical": "row-danger",
+}
+
+
+def build_dashboard_html():
+    """Builds the full Threat Log dashboard: summary stats cards,
+    a breakdown by attack type, and a table of the most recent
+    entries (worst-first within each source, newest-first overall)."""
+    log_df = read_log()
+
+    if len(log_df) == 0:
+        return """
+        <div class="dashboard-empty">
+            <p>No detections logged yet. Run a single-flow analysis or a batch
+            upload on the other tabs, and entries will appear here automatically.</p>
+        </div>
+        """
+
+    total_scans = len(log_df)
+    threat_count = len(log_df[log_df["prediction"] != "BENIGN"])
+    benign_count = total_scans - threat_count
+    threat_pct = round((threat_count / total_scans) * 100, 1) if total_scans else 0
+
+    # Stat cards
+    cards_html = f"""
+    <div class="dashboard-cards">
+        <div class="dash-card">
+            <div class="dash-card-value">{total_scans}</div>
+            <div class="dash-card-label">Total Scans Logged</div>
+        </div>
+        <div class="dash-card dash-card-danger">
+            <div class="dash-card-value">{threat_count}</div>
+            <div class="dash-card-label">Threats Detected</div>
+        </div>
+        <div class="dash-card dash-card-safe">
+            <div class="dash-card-value">{benign_count}</div>
+            <div class="dash-card-label">Benign Traffic</div>
+        </div>
+        <div class="dash-card">
+            <div class="dash-card-value">{threat_pct}%</div>
+            <div class="dash-card-label">Threat Rate</div>
+        </div>
+    </div>
+    """
+
+    # Breakdown by attack type
+    breakdown = log_df["prediction"].value_counts()
+    breakdown_html = "<div class='dashboard-breakdown'><h4>Breakdown by Traffic Type</h4><ul>"
+    for cls in class_names:
+        c = breakdown.get(cls, 0)
+        if c > 0:
+            pct = round((c / total_scans) * 100, 1)
+            breakdown_html += f"<li><strong>{cls}</strong>: {c} ({pct}%)</li>"
+    breakdown_html += "</ul></div>"
+
+    # Recent entries table, newest first
+    recent = log_df.sort_values("timestamp", ascending=False).head(100)
+    rows_html = ""
+    for _, r in recent.iterrows():
+        row_class = SEVERITY_ROW_CLASS.get(r["severity"], "row-medium")
+        rows_html += (
+            f"<tr class='{row_class}'>"
+            f"<td>{r['timestamp']}</td>"
+            f"<td>{r['source']}</td>"
+            f"<td>{r['prediction']}</td>"
+            f"<td>{r['confidence']}%</td>"
+            f"</tr>"
+        )
+
+    table_html = f"""
+    <div class="batch-table-wrap">
+        <table class="batch-table">
+            <thead>
+                <tr><th>Time</th><th>Source</th><th>Prediction</th><th>Confidence</th></tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+    </div>
+    <p class="table-note">Showing the {min(100, total_scans)} most recent of {total_scans} logged detections.</p>
+    """
+
+    return cards_html + breakdown_html + table_html
 
 # ── Load saved model files ────────────────────────────────
 model            = joblib.load('model/final_model.pkl')
@@ -248,6 +397,10 @@ def predict_threat(*values):
     input_dict = dict(zip(top_features, values))
     label, confidence, proba_dict = predict_single_row(input_dict)
     result_text, css_classes = build_result_text(label, confidence, proba_dict)
+
+    info = ATTACK_INFO.get(label, DEFAULT_ATTACK_INFO)
+    log_detection("Single Flow", label, confidence, info["severity"])
+
     return gr.update(value=result_text, elem_classes=css_classes)
 
 
@@ -304,6 +457,7 @@ def analyse_batch(file):
         batch_df = batch_df.iloc[:MAX_ROWS]
 
     results = []
+    log_rows = []
     for i, row in batch_df.iterrows():
         row_dict = {f: row[f] for f in all_features if f in batch_df.columns}
         try:
@@ -321,6 +475,10 @@ def analyse_batch(file):
             "Severity": SEVERITY_STYLE.get(severity, SEVERITY_STYLE["medium"])["label"],
             "_severity_rank": SEVERITY_RANK.get(severity, 2),
         })
+        if label != "ERROR":
+            log_rows.append((label, confidence, severity))
+
+    log_detections_bulk("Batch CSV", log_rows)
 
     results_df = pd.DataFrame(results)
     # Worst-first ordering: critical/high threats surface at the top
@@ -522,6 +680,64 @@ input[type="number"]:focus {
     margin: 0;
     font-style: italic;
 }
+
+/* Threat Log dashboard */
+.dashboard-empty {
+    padding: 40px 20px;
+    text-align: center;
+    color: #64748b;
+    background: #f8fafc;
+    border: 1.5px dashed #cbd5e1;
+    border-radius: 10px;
+}
+.dashboard-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.dash-card {
+    background: #f8fafc;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+}
+.dash-card-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #1e293b;
+}
+.dash-card-label {
+    font-size: 12px;
+    color: #64748b;
+    margin-top: 4px;
+}
+.dash-card-danger { border-color: #ef4444; }
+.dash-card-danger .dash-card-value { color: #b91c1c; }
+.dash-card-safe { border-color: #22c55e; }
+.dash-card-safe .dash-card-value { color: #15803d; }
+
+.dashboard-breakdown {
+    background: #ffffff;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+}
+.dashboard-breakdown h4 {
+    margin: 0 0 10px 0;
+    color: #1e293b;
+}
+.dashboard-breakdown ul {
+    margin: 0;
+    padding-left: 20px;
+}
+.dashboard-breakdown li {
+    color: #334155;
+    font-size: 13px;
+    margin-bottom: 4px;
+}
 """
 
 
@@ -632,11 +848,40 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
                 outputs=[batch_summary, batch_table]
             )
 
+        # ───────────── TAB 3: Threat Log Dashboard ─────────────
+        with gr.Tab("📊 Threat Log"):
+
+            gr.Markdown("""
+            ### Detection History Dashboard
+            Every analysis you run -- single flow or batch -- is automatically recorded here.
+            This gives you a running view of how much traffic has been scanned and how many
+            threats have been found over time.
+
+            *Note: this log is stored in the app's working storage. It survives normal restarts,
+            but may reset if the Space is rebuilt from scratch (e.g. after a code update).*
+            """)
+
+            with gr.Row():
+                refresh_log_btn = gr.Button("🔄 Refresh Dashboard", variant="primary")
+                clear_log_btn = gr.Button("🗑️ Clear Log")
+
+            dashboard_html = gr.HTML(value=build_dashboard_html())
+
+            refresh_log_btn.click(fn=build_dashboard_html, outputs=dashboard_html)
+            clear_log_btn.click(fn=clear_log, outputs=dashboard_html)
+
+            # Also refresh the dashboard automatically whenever a new
+            # detection happens on the other two tabs, so switching to
+            # this tab always shows up-to-date numbers without an extra click.
+            analyse_btn.click(fn=build_dashboard_html, outputs=dashboard_html)
+            batch_btn.click(fn=build_dashboard_html, outputs=dashboard_html)
+
     gr.Markdown("""
     ---
     ### 🧪 Tip
     Use **Single Flow Analysis** to test one example at a time and see detailed plain-English
-    explanations, or use **Batch CSV Analysis** to scan many flows from a real traffic log at once.
+    explanations, use **Batch CSV Analysis** to scan many flows from a real traffic log at once,
+    and check the **Threat Log** tab anytime to see your detection history and overall stats.
     """)
 
 app.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
