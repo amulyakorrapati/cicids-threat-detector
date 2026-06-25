@@ -554,4 +554,4 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
     explanations, or use **Batch CSV Analysis** to scan many flows from a real traffic log at once.
     """)
 
-app.launch(server_name="0.0.0.0", server_port=7860)
+app.launch(server_name="0.0.0.0", server_port=7860, show_api=False)
