@@ -265,13 +265,13 @@ def analyse_batch(file):
     if file is None:
         return (
             "No file uploaded yet. Please choose a CSV file above first.",
-            None
+            ""
         )
 
     try:
         batch_df = pd.read_csv(file.name, low_memory=False)
     except Exception as e:
-        return (f"Could not read this file as a CSV. Error: {e}", None)
+        return (f"Could not read this file as a CSV. Error: {e}", "")
 
     # Clean column names the same way training does, so a CSV exported
     # from the same kind of tool (e.g. CICFlowMeter) lines up correctly.
@@ -294,7 +294,7 @@ def analyse_batch(file):
     batch_df.fillna(0, inplace=True)
 
     if len(batch_df) == 0:
-        return ("The uploaded file had no usable rows.", None)
+        return ("The uploaded file had no usable rows.", "")
 
     # Cap how many rows we process in one go, to keep the free-tier
     # Space responsive. 5,000 rows is generous for a demo and still fast.
@@ -329,6 +329,56 @@ def analyse_batch(file):
         by=["_severity_rank", "Confidence (%)"], ascending=[True, False]
     ).drop(columns=["_severity_rank"])
 
+    # Build an HTML table instead of returning a gr.Dataframe value.
+    # (gr.Dataframe currently has a Gradio/gradio_client schema bug that
+    # crashes the whole app on startup -- rendering plain HTML avoids
+    # that code path entirely while still giving a clean, styled table.)
+    severity_row_class = {
+        "No Threat": "row-safe",
+        "Low Severity": "row-low",
+        "Medium Severity": "row-medium",
+        "High Severity": "row-high",
+        "Critical Severity": "row-danger",
+    }
+
+    # Only show up to 500 rows in the table itself (the summary above
+    # already covers the full dataset) so the page doesn't become huge.
+    DISPLAY_CAP = 500
+    display_df = results_df.head(DISPLAY_CAP)
+
+    table_rows_html = ""
+    for _, r in display_df.iterrows():
+        row_class = severity_row_class.get(r["Severity"], "row-medium")
+        table_rows_html += (
+            f"<tr class='{row_class}'>"
+            f"<td>{r['Row']}</td>"
+            f"<td>{r['Prediction']}</td>"
+            f"<td>{r['Confidence (%)']}%</td>"
+            f"<td>{r['Severity']}</td>"
+            f"</tr>"
+        )
+
+    table_note = ""
+    if len(results_df) > DISPLAY_CAP:
+        table_note = (
+            f"<p class='table-note'>Showing the {DISPLAY_CAP} most severe rows out of "
+            f"{len(results_df)} analysed. The summary above reflects all {len(results_df)} rows.</p>"
+        )
+
+    results_html = f"""
+    <div class="batch-table-wrap">
+        {table_note}
+        <table class="batch-table">
+            <thead>
+                <tr><th>Row</th><th>Prediction</th><th>Confidence</th><th>Severity</th></tr>
+            </thead>
+            <tbody>
+                {table_rows_html}
+            </tbody>
+        </table>
+    </div>
+    """
+
     # Build the summary
     counts = pd.Series([r["Prediction"] for r in results]).value_counts()
     total = len(results)
@@ -348,7 +398,7 @@ def analyse_batch(file):
 
     summary_text = "\n".join(summary_lines)
 
-    return summary_text, results_df
+    return summary_text, results_html
 
 
 # ── Theme + custom CSS ─────────────────────────────────────
@@ -432,6 +482,45 @@ input[type="number"]:focus {
     font-size: 11px !important;
     color: #94a3b8 !important;
     margin: -8px 0 8px 4px !important;
+}
+
+/* Batch results table (replaces gr.Dataframe to avoid a Gradio schema bug) */
+.batch-table-wrap {
+    max-height: 500px;
+    overflow-y: auto;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 10px;
+    background: #ffffff;
+}
+.batch-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.batch-table thead th {
+    position: sticky;
+    top: 0;
+    background: #1e293b;
+    color: #ffffff;
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+}
+.batch-table tbody td {
+    padding: 8px 14px;
+    border-bottom: 1px solid #e2e8f0;
+}
+.batch-table tbody tr.row-safe   { background: #f0fdf4; color: #15803d; }
+.batch-table tbody tr.row-low    { background: #fefce8; color: #854d0e; }
+.batch-table tbody tr.row-medium { background: #fff7ed; color: #9a3412; }
+.batch-table tbody tr.row-high   { background: #fef2f2; color: #991b1b; }
+.batch-table tbody tr.row-danger { background: #fef2f2; color: #b91c1c; font-weight: 700; }
+.table-note {
+    font-size: 12px;
+    color: #64748b;
+    padding: 10px 14px;
+    margin: 0;
+    font-style: italic;
 }
 """
 
@@ -535,11 +624,7 @@ with gr.Blocks(title="Telecom Threat Detector", theme=custom_theme, css=custom_c
 
             gr.Markdown("### 📋 Per-Row Results")
             gr.Markdown("*Sorted with the most severe detections first.*")
-            batch_table = gr.Dataframe(
-                headers=["Row", "Prediction", "Confidence (%)", "Severity"],
-                interactive=False,
-                wrap=True
-            )
+            batch_table = gr.HTML(value="<p class='table-note'>Results will appear here after analysis.</p>")
 
             batch_btn.click(
                 fn=analyse_batch,
